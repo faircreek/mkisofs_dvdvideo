@@ -1,0 +1,6 @@
+For prosperity only, or if you are curious on DVD video data structures
+
+This is the patch for mkisofs so that the DVD video files are written
+on the correct start sectors according to the info in the VIDEO_TS.IFO
+file. 
+

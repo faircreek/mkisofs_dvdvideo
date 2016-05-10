@@ -1,0 +1,2263 @@
+diff -u --new-file cdrtools-1.11-old/mkisofs/Makefile cdrtools-1.11/mkisofs/Makefile
+--- cdrtools-1.11-old/mkisofs/Makefile	Thu Nov 22 07:42:31 2001
++++ cdrtools-1.11/mkisofs/Makefile	Wed Jul 17 16:12:02 2002
+@@ -27,6 +27,8 @@
+ CPPOPTS +=	-DAPPLE_HYB
+ CPPOPTS +=	-DUDF
+ CPPOPTS +=	-DSORTING
++#Remove comment if you want DVD-VIDEO support
++CPPOPTS +=	-DDVD_VIDEO
+ CPPOPTS +=	-I../libhfs_iso/
+ CPPOPTS	+=	-DHAVE_CONFIG_H -DUSE_LIBSCHILY -DUSE_SCG \
+ 		'-DAPPID_DEFAULT="MKISOFS ISO 9660/HFS FILESYSTEM BUILDER & CDRECORD CD-R/DVD CREATOR (C) 1993 E.YOUNGDALE (C) 1997 J.PEARSON/J.SCHILLING"' \
+@@ -37,10 +39,12 @@
+ 		scsi.c \
+ 		scsi_cdr.c cd_misc.c \
+ 		modes.c \
+-		apple.c volume.c desktop.c mac_label.c
++		apple.c volume.c desktop.c mac_label.c \
++		ifo_read.c dvd_reader.c
+ HFILES=		apple.h bootinfo.h config.h defaults.h diskmbr.h exclude.h \
+ 		fnmatch.h getopt.h iso9660.h mac_label.h mactypes.h match.h \
+-		mkisofs.h sunlabel.h udf.h udf_fs.h vms.h 
++		mkisofs.h sunlabel.h udf.h udf_fs.h vms.h \
++		ifo_read.h dvd_reader.h bswap.h ifo_types.h 
+ 
+ LIBS=		-lhfs -lfile -lunls -lrscg -lscg -lschily $(SCSILIB) $(LIB_SOCKET)
+ XMK_FILE=	Makefile.man hybridman.mk
+diff -u --new-file cdrtools-1.11-old/mkisofs/bswap.h cdrtools-1.11/mkisofs/bswap.h
+--- cdrtools-1.11-old/mkisofs/bswap.h	Wed Dec 31 16:00:00 1969
++++ cdrtools-1.11/mkisofs/bswap.h	Wed Jul 17 16:10:36 2002
+@@ -0,0 +1,87 @@
++#ifndef BSWAP_H_INCLUDED
++#define BSWAP_H_INCLUDED
++
++/*
++ * Copyright (C) 2000, 2001 Billy Biggs <vektor@dumbterm.net>,
++ *                          Håkan Hjort <d95hjort@dtek.chalmers.se>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
++ */
++#include <mconfig.h>
++#include <btorder.h>
++
++#if defined(WORDS_BIGENDIAN)
++/* All bigendian systems are fine, just ignore the swaps. */  
++#define B2N_16(x) (void)(x)
++#define B2N_32(x) (void)(x)
++#define B2N_64(x) (void)(x)
++
++#else 
++
++#if defined(__linux__)
++#include <byteswap.h>
++#define B2N_16(x) x = bswap_16(x)
++#define B2N_32(x) x = bswap_32(x)
++#define B2N_64(x) x = bswap_64(x)
++
++#elif defined(__NetBSD__)
++#include <sys/endian.h>
++#define B2N_16(x) BE16TOH(x)
++#define B2N_32(x) BE32TOH(x)
++#define B2N_64(x) BE64TOH(x)
++
++#elif defined(__OpenBSD__)
++#include <sys/endian.h>
++#define B2N_16(x) x = swap16(x)
++#define B2N_32(x) x = swap32(x)
++#define B2N_64(x) x = swap64(x)
++
++/* This is a slow but portable implementation, it has multiple evaluation 
++ * problems so beware.
++ * FreeBSD and Solaris don't have <byteswap.h> or any other such 
++ * functionality! 
++ */
++
++#elif defined(__FreeBSD__) || defined(__sun) || defined(__bsdi__)
++#define B2N_16(x) \
++ x = ((((x) & 0xff00) >> 8) | \
++      (((x) & 0x00ff) << 8))
++#define B2N_32(x) \
++ x = ((((x) & 0xff000000) >> 24) | \
++      (((x) & 0x00ff0000) >>  8) | \
++      (((x) & 0x0000ff00) <<  8) | \
++      (((x) & 0x000000ff) << 24))
++#define B2N_64(x) \
++ x = ((((x) & 0xff00000000000000) >> 56) | \
++      (((x) & 0x00ff000000000000) >> 40) | \
++      (((x) & 0x0000ff0000000000) >> 24) | \
++      (((x) & 0x000000ff00000000) >>  8) | \
++      (((x) & 0x00000000ff000000) <<  8) | \
++      (((x) & 0x0000000000ff0000) << 24) | \
++      (((x) & 0x000000000000ff00) << 40) | \
++      (((x) & 0x00000000000000ff) << 56))
++
++#else
++
++/* If there isn't a header provided with your system with this functionality
++ * add the relevant || define( ) to the portable implementation above.
++ */
++#error "You need to add endian swap macros for you're system"
++
++#endif
++
++#endif /* WORDS_BIGENDIAN */
++
++#endif /* BSWAP_H_INCLUDED */
+Common subdirectories: cdrtools-1.11-old/mkisofs/diag and cdrtools-1.11/mkisofs/diag
+diff -u --new-file cdrtools-1.11-old/mkisofs/dvd_reader.c cdrtools-1.11/mkisofs/dvd_reader.c
+--- cdrtools-1.11-old/mkisofs/dvd_reader.c	Wed Dec 31 16:00:00 1969
++++ cdrtools-1.11/mkisofs/dvd_reader.c	Wed Jul 17 16:10:36 2002
+@@ -0,0 +1,290 @@
++/*
++ * Copyright (C) 2001, 2002 Billy Biggs <vektor@dumbterm.net>,
++ *                          Håkan Hjort <d95hjort@dtek.chalmers.se>,
++ *                          Olaf Beck <olaf_sc@yahoo.com>
++ *			    (I only did the cut down no other contribs)
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or (at
++ * your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++/*
++ * NOTE: This is a cut down version of libdvdread for mkisofs, due
++ * to portability issues with the current libdvdread according to
++ * the maintainer of mkisofs.
++ * This cut down version only reads from a harddisk file structure
++ * and it only implements the functions necessary inorder to make
++ * mkisofs produce valid DVD-Video images.
++ * DON'T USE THIS LIBRARY IN ANY OTHER PROGRAM GET THE REAL
++ * LIBDVDREAD INSTEAD
++ */
++#ifdef DVD_VIDEO
++
++#include <mconfig.h>
++
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#include <limits.h>
++
++#include "dvd_reader.h"
++
++
++
++
++struct dvd_file_s {
++    /* Basic information. */
++    dvd_reader_t *dvd;
++
++    /* Calculated at open-time, size in blocks. */
++    ssize_t filesize;
++};
++
++
++/**
++ * Free a DVD file
++ */
++#ifdef PROTOTYPES
++void DVDCloseFile( dvd_file_t *dvd_file ) 
++#else
++void DVDCloseFile( dvd_file )
++	dvd_file_t *dvd_file;
++#endif
++{
++        free( dvd_file );
++        dvd_file = 0;
++}
++
++
++/**
++ * Stat a IFO or BUP file from a DVD directory tree.
++ */
++#ifdef PROTOTYPES
++static dvd_file_t *DVDOpenFilePath( dvd_reader_t *dvd, char *filename ) 
++#else
++static dvd_file_t *DVDOpenFilePath( dvd, filename )
++	dvd_reader_t *dvd;
++	char *filename;
++#endif
++{
++
++	char full_path[ PATH_MAX + 1 ];
++	dvd_file_t *dvd_file;
++	struct stat fileinfo;
++
++	/* Get the full path of the file. */
++
++	sprintf( full_path, "%s/%s", dvd->path_root, filename );
++
++
++	dvd_file = (dvd_file_t *) malloc( sizeof( dvd_file_t ) );
++	if( !dvd_file ) return 0;
++	dvd_file->dvd = dvd;
++	dvd_file->filesize = 0;
++
++	if( stat( full_path, &fileinfo ) < 0 ) {
++		free( dvd_file );
++		return 0;
++	}
++	dvd_file->filesize = fileinfo.st_size / DVD_VIDEO_LB_LEN;;
++
++	return dvd_file;
++}
++
++
++/**
++ * Stat a VOB file from a DVD directory tree.
++ */
++#ifdef PROTOTYPES
++static dvd_file_t *DVDOpenVOBPath( dvd_reader_t *dvd, int title, int menu ) 
++#else
++static dvd_file_t *DVDOpenVOBPath( dvd, title, menu )
++	dvd_reader_t *dvd;
++	int title;
++	int menu;
++#endif
++{
++
++	char filename[ PATH_MAX + 1 ];
++	struct stat fileinfo;
++	dvd_file_t *dvd_file;
++	int i;
++
++	dvd_file = (dvd_file_t *) malloc( sizeof( dvd_file_t ) );
++	if( !dvd_file ) return 0;
++	dvd_file->dvd = dvd;
++	dvd_file->filesize = 0;
++
++	if( menu ) {
++		if( title == 0 ) {
++			sprintf( filename, "%s/VIDEO_TS/VIDEO_TS.VOB", dvd->path_root );
++		} else {
++			sprintf( filename, "%s/VIDEO_TS/VTS_%02i_0.VOB", dvd->path_root, title );
++		}
++		if ( stat(filename, &fileinfo) < 0 ) {
++			free( dvd_file );
++			return(0);
++		}
++		dvd_file->filesize = fileinfo.st_size / DVD_VIDEO_LB_LEN;
++	} else {
++		 for( i = 0; i < 9; ++i ) {
++
++			sprintf( filename, "%s/VIDEO_TS/VTS_%02i_%i.VOB", dvd->path_root, title, i + 1 );
++			if( stat( filename, &fileinfo ) < 0 ) {
++					break;
++			}
++
++			dvd_file->filesize += fileinfo.st_size / DVD_VIDEO_LB_LEN;
++		}
++	}
++
++	return dvd_file;
++}
++
++/**
++ * Stat a DVD file from a DVD directory tree
++ */
++#ifdef PROTOTYPES
++dvd_file_t *DVDOpenFile( dvd_reader_t *dvd, int titlenum,
++                         dvd_read_domain_t domain )
++#else
++dvd_file_t *DVDOpenFile( dvd, titlenum, domain )
++	dvd_reader_t *dvd;
++	int titlenum;
++	dvd_read_domain_t domain;
++#endif
++{
++    char filename[ MAX_UDF_FILE_NAME_LEN ];
++
++    switch( domain ) {
++    case DVD_READ_INFO_FILE:
++        if( titlenum == 0 ) {
++            sprintf( filename, "/VIDEO_TS/VIDEO_TS.IFO" );
++        } else {
++            sprintf( filename, "/VIDEO_TS/VTS_%02i_0.IFO", titlenum );
++        }
++        break;
++    case DVD_READ_INFO_BACKUP_FILE:
++        if( titlenum == 0 ) {
++            sprintf( filename, "/VIDEO_TS/VIDEO_TS.BUP" );
++        } else {
++            sprintf( filename, "/VIDEO_TS/VTS_%02i_0.BUP", titlenum );
++        }
++        break;
++    case DVD_READ_MENU_VOBS:
++    	return DVDOpenVOBPath( dvd, titlenum, 1 );
++        break;
++    case DVD_READ_TITLE_VOBS:
++        if( titlenum == 0 ) return 0;
++        return DVDOpenVOBPath( dvd, titlenum, 0 );
++        break;
++    default:
++        fprintf( stderr, " Invalid domain for file open.\n" );
++        return 0;
++    }
++
++    return DVDOpenFilePath( dvd, filename );
++}
++
++
++
++/**
++ * Stat a DVD directory structure
++ */
++#ifdef PROTOTYPES
++static dvd_reader_t *DVDOpenPath( const char *path_root )
++#else
++static dvd_reader_t *DVDOpenPath( path_root )
++	const char *path_root;
++#endif
++{
++    dvd_reader_t *dvd;
++
++    dvd = (dvd_reader_t *) malloc( sizeof( dvd_reader_t ) );
++    if( !dvd ) return 0;
++    dvd->path_root = strdup( path_root );
++
++    return dvd;
++}
++
++
++/**
++ * Stat a DVD structure - this one only works with directory structures
++ */
++#ifdef PROTOTYPES
++dvd_reader_t *DVDOpen( const char *path )
++#else
++dvd_reader_t *DVDOpen( path )
++	const char *path;
++#endif
++{
++    struct stat fileinfo;
++    int ret;
++
++    if( !path ) return(0);
++
++    ret = stat( path, &fileinfo );
++    if( ret < 0 ) {
++        /* If we can't stat the file, give up */
++        fprintf( stderr, " Can't stat %s\n", path );
++        perror("");
++        return(0);
++    }
++
++
++    if(S_ISDIR( fileinfo.st_mode )) {
++        return DVDOpenPath( path );
++
++    }
++
++    /* If it's none of the above, screw it. */
++    fprintf( stderr, " Could not open %s\n", path );
++    return(0);
++}
++
++/**
++ * Free a DVD structure - this one will only close a directory tree
++ */
++#ifdef PROTOTYPES
++void DVDClose( dvd_reader_t *dvd ) 
++#else
++void DVDClose( dvd )
++	dvd_reader_t *dvd;
++#endif
++{
++    if( dvd ) {
++        if( dvd->path_root ) free( dvd->path_root );
++        free( dvd );
++        dvd = 0;
++    }
++}
++
++
++
++/**
++ * Return the size of a DVD file
++ */
++#ifdef PROTOTYPES
++ssize_t DVDFileSize( dvd_file_t *dvd_file ) 
++#else
++ssize_t DVDFileSize( dvd_file )
++	dvd_file_t *dvd_file;
++#endif
++{
++    return dvd_file->filesize;
++}
++
++#endif /* DVD_VIDEO */
+diff -u --new-file cdrtools-1.11-old/mkisofs/dvd_reader.h cdrtools-1.11/mkisofs/dvd_reader.h
+--- cdrtools-1.11-old/mkisofs/dvd_reader.h	Wed Dec 31 16:00:00 1969
++++ cdrtools-1.11/mkisofs/dvd_reader.h	Wed Jul 17 16:10:36 2002
+@@ -0,0 +1,138 @@
++#ifndef DVD_READER_H_INCLUDED
++#define DVD_READER_H_INCLUDED
++
++/*
++ * Copyright (C) 2001, 2002 Billy Biggs <vektor@dumbterm.net>,
++ *                          Håkan Hjort <d95hjort@dtek.chalmers.se
++ *                          Olaf Beck <olaf_sc@yahoo.com>
++ *			    (I only did the cut down no other contribs)
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or (at
++ * your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++/*
++ * NOTE: This is a cut down version of libdvdread for mkisofs, due
++ * to portability issues with the current libdvdread according to
++ * the maintainer of mkisofs.
++ * This cut down version only reads from a harddisk file structure
++ * and it only implements the functions necessary inorder to make
++ * mkisofs produce valid DVD-Video images.
++ * DON'T USE THIS LIBRARY IN ANY OTHER PROGRAM GET THE REAL
++ * LIBDVDREAD INSTEAD
++ */
++
++
++
++#include <sys/types.h>
++
++/**
++ * Maximum length of filenames for UDF.
++ */
++#define MAX_UDF_FILE_NAME_LEN 2048
++
++/**
++ * The length of one Logical Block of a DVD Video.
++ */
++#define DVD_VIDEO_LB_LEN 2048
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++
++struct dvd_reader_s {
++    /* Information required for a directory path drive. */
++    char *path_root;
++};
++
++
++typedef struct dvd_reader_s dvd_reader_t;
++typedef struct dvd_file_s dvd_file_t;
++
++
++/**
++ * dvd = DVDOpen(path);
++ * Opens a directory name of a DVD-Video structure on HD.
++ * Returns zero if it fails.
++ * The path should be like this
++ * "path/VIDEO_TS/VTS_01_1.VOB"
++ */
++
++
++dvd_reader_t *DVDOpen( const char * );
++
++
++/**
++ * DVDClose(dvd);
++ *
++ * Closes and cleans up the DVD reader object.  You must close all open files
++ * before calling this function.
++ */
++
++
++void DVDClose( dvd_reader_t * );
++
++/**
++ * INFO_FILE       : VIDEO_TS.IFO     (manager)
++ *                   VTS_XX_0.IFO     (title)
++ *
++ * INFO_BACKUP_FILE: VIDEO_TS.BUP     (manager)
++ *                   VTS_XX_0.BUP     (title)
++ *
++ * MENU_VOBS       : VIDEO_TS.VOB     (manager)
++ *                   VTS_XX_0.VOB     (title)
++ *
++ * TITLE_VOBS      : VTS_XX_[1-9].VOB (title)
++ *                   All files in the title set are opened and
++ *                   read as a single file.
++ */
++typedef enum {
++    DVD_READ_INFO_FILE,
++    DVD_READ_INFO_BACKUP_FILE,
++    DVD_READ_MENU_VOBS,
++    DVD_READ_TITLE_VOBS
++} dvd_read_domain_t;
++
++/**
++ * dvd_file = DVDOpenFile(dvd, titlenum, domain);
++ *
++ * Opens a file on the DVD given the title number and domain.  If the title
++ * number is 0, the video manager information is opened
++ * (VIDEO_TS.[IFO,BUP,VOB]).  Returns a file structure which may be used for
++ * reads, or 0 if the file was not found.
++ */
++dvd_file_t * DVDOpenFile( dvd_reader_t *, int, dvd_read_domain_t );
++
++/**
++ * DVDCloseFile(dvd_file);
++ *
++ * Closes a file and frees the associated structure.
++ */
++void DVDCloseFile( dvd_file_t * );
++
++
++/**
++ * blocks = DVDFileSize(dvd_file);
++ *
++ * Returns the file size in blocks.
++ */
++ssize_t DVDFileSize( dvd_file_t * );
++
++
++#ifdef __cplusplus
++};
++#endif
++#endif /* DVD_READER_H_INCLUDED */
++
++
+diff -u --new-file cdrtools-1.11-old/mkisofs/ifo_read.c cdrtools-1.11/mkisofs/ifo_read.c
+--- cdrtools-1.11-old/mkisofs/ifo_read.c	Wed Dec 31 16:00:00 1969
++++ cdrtools-1.11/mkisofs/ifo_read.c	Wed Jul 17 16:10:36 2002
+@@ -0,0 +1,491 @@
++/*
++ * Copyright (C) 2002 Olaf Beck <olaf_sc@yahoo.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or (at
++ * your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++/*
++ * NOTE: This is a cut down version of libdvdread for mkisofs, due
++ * to portability issues with the current libdvdread according to
++ * the maintainer of mkisofs.
++ * This cut down version only reads from a harddisk file structure
++ * and it only implements the functions necessary inorder to make
++ * mkisofs produce valid DVD-Video images.
++ * DON'T USE THIS LIBRARY IN ANY OTHER PROGRAM GET THE REAL
++ * LIBDVDREAD INSTEAD
++ */
++#ifdef DVD_VIDEO
++
++#include <mconfig.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
++
++#include <utypes.h>
++
++#include <limits.h>
++
++#include "ifo_read.h"
++#include "bswap.h"
++
++#ifdef PROTOTYPES
++static ifo_handle_t * ifoReadVTSI(int file, ifo_handle_t * ifofile)
++#else
++static ifo_handle_t * ifoReadVTSI(file, ifofile)
++	int file;
++	ifo_handle_t * ifofile;
++#endif
++{
++
++
++	off_t offset;
++	UInt32_t sector;
++
++	vtsi_mat_t * vtsi_mat;
++
++	/* Make the VMG part NULL */
++	ifofile->vmgi_mat = NULL;
++  	ifofile->tt_srpt = NULL;
++
++
++	vtsi_mat = (vtsi_mat_t *)malloc(sizeof(vtsi_mat_t));
++	if(!vtsi_mat) {
++		fprintf(stderr, "Memmory allocation error\n");
++		free(ifofile);
++		return(0);
++	}
++
++
++	ifofile->vtsi_mat = vtsi_mat;
++
++	/* Last sector of VTS i.e. last sector of BUP */
++
++	offset = 12;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++
++	if ( read(file, &sector, sizeof(sector)) !=  sizeof(sector) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++	B2N_32(sector);
++
++	vtsi_mat->vts_last_sector = sector;
++
++	/* Last sector of IFO */
++
++
++	offset = 28;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++
++	if ( read(file, &sector, sizeof(sector)) !=  sizeof(sector) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++	B2N_32(sector);
++
++	vtsi_mat->vtsi_last_sector = sector;
++
++
++	/* Star sector of VTS Menu VOB */
++
++	offset = 192;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++
++	if ( read(file, &sector, sizeof(sector)) !=  sizeof(sector) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++	B2N_32(sector);
++
++	vtsi_mat->vtsm_vobs = sector;
++
++
++	/* Start sector of VTS Title VOB */
++
++
++	offset = 196;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++
++	if ( read(file, &sector, sizeof(sector)) !=  sizeof(sector) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++	B2N_32(sector);
++
++	vtsi_mat->vtstt_vobs = sector;
++
++	return(ifofile);
++
++}
++
++
++#ifdef PROTOTYPES
++static ifo_handle_t * ifoReadVGMI(int file, ifo_handle_t * ifofile) 
++#else
++static ifo_handle_t * ifoReadVGMI( file, ifofile)
++	int file;
++	ifo_handle_t * ifofile;
++#endif
++{
++
++
++	off_t offset;
++	int counter;
++
++	UInt32_t sector;
++	UInt16_t titles;
++
++
++
++	vmgi_mat_t *vmgi_mat;
++	tt_srpt_t *tt_srpt;
++
++	/* Make the VTS part null */
++	ifofile->vtsi_mat = NULL;
++
++	vmgi_mat = (vmgi_mat_t *)malloc(sizeof(vmgi_mat_t));
++	if(!vmgi_mat) {
++		fprintf(stderr, "Memmory allocation error\n");
++		free(ifofile);
++		return(0);
++	}
++
++	ifofile->vmgi_mat = vmgi_mat;
++
++	/* Last sector of VMG i.e. last sector of BUP */
++
++	offset = 12;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++
++	if ( read(file, &sector, sizeof(sector)) !=  sizeof(sector) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++	B2N_32(sector);
++
++	vmgi_mat->vmg_last_sector = sector;
++
++	/* Last sector of IFO */
++
++
++	offset = 28;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++
++	if ( read(file, &sector, sizeof(sector)) !=  sizeof(sector) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++	B2N_32(sector);
++
++	vmgi_mat->vmgi_last_sector = sector;
++
++
++	/* Number of VTS i.e. title sets */
++
++	offset = 62;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++
++	if ( read(file, &titles, sizeof(titles)) !=  sizeof(titles) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++	B2N_16(titles);
++
++	vmgi_mat->vmg_nr_of_title_sets = titles;
++
++
++
++	/* Star sector of VMG Menu VOB */
++
++	offset = 192;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++
++	if ( read(file, &sector, sizeof(sector)) !=  sizeof(sector) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++	B2N_32(sector);
++
++	vmgi_mat->vmgm_vobs = sector;
++
++
++	/* Sector offset to TT_SRPT */
++
++
++	offset = 196;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++
++	if ( read(file, &sector, sizeof(sector)) !=  sizeof(sector) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		ifoClose(ifofile);
++		return(0);
++	}
++
++	B2N_32(sector);
++
++	vmgi_mat->tt_srpt = sector;
++
++
++	tt_srpt = (tt_srpt_t *)malloc(sizeof(tt_srpt_t));
++	if(!tt_srpt) {
++		fprintf(stderr, "Memmory allocation error\n");
++		ifoClose(ifofile);
++	}
++
++	ifofile->tt_srpt = tt_srpt;
++
++
++	/* Number of titles in TT_SRPT */
++
++	offset = 2048 * vmgi_mat->tt_srpt;
++
++	if (lseek(file, offset, SEEK_SET) != offset ) {
++		fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++		return(0);
++	}
++
++
++	if ( read(file, &titles, sizeof(titles)) !=  sizeof(titles) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		return(0);
++	}
++
++	B2N_16(titles);
++
++	tt_srpt->nr_of_srpts = titles;
++
++
++	tt_srpt->title = (title_info_t *)malloc(sizeof(title_info_t) * tt_srpt->nr_of_srpts);
++	if(!tt_srpt->title) {
++		fprintf(stderr, "Memmory allocation error\n");
++		ifoClose(ifofile);
++		return (0);
++	}
++
++
++	/* Start sector of each title in TT_SRPT */
++
++	for (counter = 0; counter <  tt_srpt->nr_of_srpts ; counter ++ ) {
++		offset = (2048 * vmgi_mat->tt_srpt) + 8 + (counter * 12) + 8;
++		if (lseek(file, offset, SEEK_SET) != offset ) {
++			fprintf(stderr, "Faild to seek VIDEO_TS.IFO\n");
++			ifoClose(ifofile);
++			return(0);
++		}
++
++		if ( read(file, &sector, sizeof(sector)) !=  sizeof(sector) ) {
++			fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++			ifoClose(ifofile);
++			return(0);
++		}
++
++		B2N_32(sector);
++
++		tt_srpt->title[counter].title_set_sector = sector;
++
++	}
++
++	return(ifofile);
++
++}
++
++#ifdef PROTOTYPES
++ifo_handle_t *ifoOpen(dvd_reader_t *dvd, int title) 
++#else
++ifo_handle_t *ifoOpen(dvd, title)
++	dvd_reader_t *dvd;
++	int title;
++#endif
++{
++
++
++	/* The main ifofile structure */
++	ifo_handle_t *ifofile;
++
++	/* File handles and offset */
++	int file;
++	off_t offset;
++	char full_path[ PATH_MAX + 1 ];
++
++
++	/* Identifier of the IFO */
++	unsigned char identifier[13]="";
++
++
++	ifofile = (ifo_handle_t *)malloc(sizeof(ifo_handle_t));
++	if(!ifofile) {
++		fprintf(stderr, "Memmory allocation error\n");
++		return 0;
++	}
++
++	memset(ifofile, 0, sizeof(ifo_handle_t));
++
++	if(title) {
++		sprintf(full_path, "%s/VIDEO_TS/VTS_%02d_0.IFO", dvd->path_root, title );
++	} else {
++		sprintf(full_path, "%s/VIDEO_TS/VIDEO_TS.IFO", dvd->path_root );
++	}
++
++	if ( (file = open(full_path, O_RDONLY)) == -1 ) {
++		fprintf(stderr, "Faild to open %s\n", full_path);
++		free(ifofile);
++		return(0);
++	}
++
++	offset = 0;
++
++	/* Determine if we have a VMGI or VTSI */
++
++	if ( read(file, &identifier, sizeof(identifier)) !=  sizeof(identifier) ) {
++		fprintf(stderr, "Faild to read VIDEO_TS.IFO\n");
++		return(0);
++	}
++
++	if ((strstr("DVDVIDEO-VMG", identifier) != 0) && (title == 0)) {
++		ifofile = ifoReadVGMI(file, ifofile);
++		close(file);
++		return(ifofile);
++	} else if ((strstr("DVDVIDEO-VTS", identifier) != 0) && (title != 0)) {
++		ifofile = ifoReadVTSI(file, ifofile);
++		close(file);
++		return(ifofile);
++	} else {
++		fprintf(stderr, "Giving up this is not a valid IFO file\n");
++		close(file);
++		free(ifofile);
++		ifofile=0;
++		return(0);
++	}
++}
++#ifdef PROTOTYPES
++static void ifoFree_TT_SRPT(ifo_handle_t *ifofile)
++#else
++static void ifoFree_TT_SRPT(ifofile)
++	ifo_handle_t *ifofile;
++#endif
++{
++	if(!ifofile)
++		return;
++
++	if(ifofile->tt_srpt) {
++		if(ifofile->tt_srpt->title) {
++    			free(ifofile->tt_srpt->title);
++		}
++    		free(ifofile->tt_srpt);
++    		ifofile->tt_srpt = 0;
++	}
++	return;
++}
++
++#ifdef PROTOTYPES
++void ifoClose(ifo_handle_t * ifofile) 
++#else
++void ifoClose(ifofile)
++	ifo_handle_t * ifofile;
++#endif
++{
++
++	if(!ifofile)
++		return;
++
++	ifoFree_TT_SRPT(ifofile);
++
++	if ( ifofile->vmgi_mat) {
++		free(ifofile->vtsi_mat);
++	}
++
++	if (ifofile->vtsi_mat) {
++		free(ifofile->vtsi_mat);
++	}
++
++	free(ifofile);
++	ifofile=0;
++}
++#endif DVD_VIDEO
+diff -u --new-file cdrtools-1.11-old/mkisofs/ifo_read.h cdrtools-1.11/mkisofs/ifo_read.h
+--- cdrtools-1.11-old/mkisofs/ifo_read.h	Wed Dec 31 16:00:00 1969
++++ cdrtools-1.11/mkisofs/ifo_read.h	Wed Jul 17 16:10:36 2002
+@@ -0,0 +1,66 @@
++#ifndef IFO_READ_H_INCLUDED
++#define IFO_READ_H_INCLUDED
++
++/*
++ * Copyright (C) 2000, 2001, 2002 Björn Englund <d4bjorn@dtek.chalmers.se>,
++ *                                Håkan Hjort <d95hjort@dtek.chalmers.se
++ *                                Olaf Beck <olaf_sc@yahoo.com>
++ *			          (I only did the cut down no other contribs)
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or (at
++ * your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++/*
++ * NOTE: This is a cut down version of libdvdread for mkisofs, due
++ * to portability issues with the current libdvdread according to
++ * the maintainer of mkisofs.
++ * This cut down version only reads from a harddisk file structure
++ * and it only implements the functions necessary inorder to make
++ * mkisofs produce valid DVD-Video images.
++ * DON'T USE THIS LIBRARY IN ANY OTHER PROGRAM GET THE REAL
++ * LIBDVDREAD INSTEAD
++ */
++
++
++
++#include "ifo_types.h"
++#include "dvd_reader.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++
++/**
++ * handle = ifoOpen(dvd, title);
++ *
++ * Opens an IFO and reads a tiny fraction of the data for the IFO file
++ * corresponding to the given title set. If title 0 is given, the video
++ * manager IFO file is read.
++ * Returns a handle to a tiny parsed fraction of a IFO strcuture
++ */
++ifo_handle_t *ifoOpen(dvd_reader_t *, int );
++
++
++/**
++ * ifoClose(ifofile);
++ * Cleans up the IFO information. This will free all data allocated. 
++ */
++void ifoClose(ifo_handle_t *);
++
++#ifdef __cplusplus
++};
++#endif
++#endif /* IFO_READ_H_INCLUDED */
++
+diff -u --new-file cdrtools-1.11-old/mkisofs/ifo_types.h cdrtools-1.11/mkisofs/ifo_types.h
+--- cdrtools-1.11-old/mkisofs/ifo_types.h	Wed Dec 31 16:00:00 1969
++++ cdrtools-1.11/mkisofs/ifo_types.h	Wed Jul 17 16:10:36 2002
+@@ -0,0 +1,73 @@
++/*
++ * Copyright (C) 2001, 2002 Billy Biggs <vektor@dumbterm.net>,
++ *                          Håkan Hjort <d95hjort@dtek.chalmers.se>,
++ *                          Olaf Beck <olaf_sc@yahoo.com>
++ *			    (I only did the cut down no other contribs)
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or (at
++ * your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++/*
++ * NOTE: This is a cut down version of libdvdread for mkisofs, due
++ * to portability issues with the current libdvdread according to
++ * the maintainer of mkisofs.
++ * This cut down version only reads from a harddisk file structure
++ * and it only implements the functions necessary inorder to make
++ * mkisofs produce valid DVD-Video images.
++ * DON'T USE THIS LIBRARY IN ANY OTHER PROGRAM GET THE REAL
++ * LIBDVDREAD INSTEAD
++ */
++
++#include "dvd_reader.h"
++
++
++typedef struct {
++  UInt32_t title_set_sector;  /* sector */
++} title_info_t;
++
++
++typedef struct {
++  UInt16_t nr_of_srpts;
++  title_info_t * title;        /* array of title info */
++} tt_srpt_t;
++
++typedef struct {
++  UInt32_t vmg_last_sector;   /*sector */
++  UInt32_t vmgi_last_sector;  /* sector */
++  UInt16_t vmg_nr_of_title_sets;
++  UInt32_t vmgm_vobs;         /* sector */
++  UInt32_t tt_srpt;           /* sector */
++} vmgi_mat_t;
++
++
++
++typedef struct {
++  UInt32_t  vts_last_sector;  /* sector */
++  UInt32_t  vtsi_last_sector; /* sector */
++  UInt32_t  vtsm_vobs;        /* sector */
++  UInt32_t  vtstt_vobs;       /* sector */
++} vtsi_mat_t;
++
++
++typedef struct {
++  /* VMGI */
++  vmgi_mat_t * vmgi_mat;
++  tt_srpt_t  * tt_srpt;
++
++  /* VTSI */
++  vtsi_mat_t * vtsi_mat;
++} ifo_handle_t;
++
++
++
+diff -u --new-file cdrtools-1.11-old/mkisofs/mkisofs.c cdrtools-1.11/mkisofs/mkisofs.c
+--- cdrtools-1.11-old/mkisofs/mkisofs.c	Sun May 12 14:23:05 2002
++++ cdrtools-1.11/mkisofs/mkisofs.c	Wed Jul 17 16:10:36 2002
+@@ -203,6 +203,10 @@
+ int	use_udf = 0;
+ #endif
+ 
++#ifdef DVD_VIDEO
++int	dvd_video=0;
++#endif
++
+ #ifdef SORTING
+ int	do_sort = 0;		/* sort file data */
+ #endif /* SORTING */
+@@ -340,6 +344,9 @@
+ #ifdef UDF
+ #define OPTION_UDF			1500
+ #endif
++#ifdef DVD_VIDEO
++#define OPTION_DVD			1510
++#endif
+ 
+ #ifdef APPLE_HYB
+ #define OPTION_CAP			2000
+@@ -544,6 +551,11 @@
+ 	'\0', NULL, "Generate UDF file system", ONE_DASH},
+ #endif
+ 
++#ifdef DVD_VIDEO
++	{{"dvd-video", no_argument, NULL, OPTION_DVD},
++	'\0', NULL, "Generate DVD-Video compainant file system", ONE_DASH},
++#endif
++
+ 	{{"uid", required_argument, NULL, OPTION_UID},
+ 	 '\0', "uid", "Make the owner of all files this uid.", 
+ 	 ONE_DASH},
+@@ -1618,6 +1630,13 @@
+ 			use_udf++;
+ 			break;
+ #endif
++
++#ifdef DVD_VIDEO
++		case OPTION_DVD:
++			use_udf++;
++			dvd_video++;
++			break;
++#endif			
+ 		case OPTION_USE_FILEVERSION:
+ 			use_fileversion++;
+ 			break;
+diff -u --new-file cdrtools-1.11-old/mkisofs/mkisofs.h cdrtools-1.11/mkisofs/mkisofs.h
+--- cdrtools-1.11-old/mkisofs/mkisofs.h	Wed May 29 15:10:05 2002
++++ cdrtools-1.11/mkisofs/mkisofs.h	Wed Jul 17 16:10:36 2002
+@@ -183,6 +183,35 @@
+ extern struct output_fragment hfs_desc;
+ 
+ #endif	/* APPLE_HYB */
++#ifdef DVD_VIDEO
++/*
++ * This structure holds the information necessary to create a valid
++ * DVD-Video image. Basically it's how much to pad the files so the
++ * file offsets described in the video_ts.ifo and vts_xx_0.ifo are
++ * the correct one in the image that we create.
++ */
++
++typedef struct {
++	int realsize_ifo;
++	int realsize_menu;
++	int realsize_bup;
++	int size_ifo;
++	int size_menu;
++	int size_title;
++	int size_bup;
++	int pad_ifo;
++	int pad_menu;
++	int pad_title;
++	int pad_bup;
++	int number_of_vob_files;
++	int realsize_vob[10];
++} title_set_t;
++
++typedef struct {
++	int num_titles;
++	title_set_t *title_set;
++} title_set_info_t; 
++#endif /* DVD_VIDEO */
+ 
+ /*
+  * This structure describes one complete directory.  It has pointers
+@@ -317,6 +346,11 @@
+ extern int      split_SL_field;
+ extern char    *trans_tbl;
+ 
++#ifdef DVD_VIDEO
++extern int    	dvd_video;
++#endif DVD_VIDEO
++
++
+ #ifdef APPLE_HYB
+ extern int      apple_hyb;	/* create HFS hybrid */
+ extern int      apple_ext;	/* use Apple extensions */
+diff -u --new-file cdrtools-1.11-old/mkisofs/tree.c cdrtools-1.11/mkisofs/tree.c
+--- cdrtools-1.11-old/mkisofs/tree.c	Sun May 12 04:10:23 2002
++++ cdrtools-1.11/mkisofs/tree.c	Wed Jul 17 16:10:36 2002
+@@ -1705,7 +1705,9 @@
+ 	/* inherit any sort weight from parent directory */
+ 	s_entry->sort = this_dir->sort;
+ 
+-#ifdef UDF
++#ifdef  DVD_VIDEO
++	/* No use at all to do a sort if we don't make a dvd video/audio
++	 */ 
+ 	/*
+ 	 * Assign special weights to VIDEO_TS and AUDIO_TS files.
+ 	 * This can't be done with sort_matches for two reasons:
+@@ -1715,10 +1717,13 @@
+ 	 * a different priority, and adding that many patterns to
+ 	 * sort_matches would slow things to a crawl.
+ 	 */
++
++	if(dvd_video) {
+ 	s_entry->sort = assign_dvd_weights(s_entry->name, this_dir, s_entry->sort);
+ 	/* turn on sorting if necessary, regardless of cmd-line options */
+ 	if (s_entry->sort != this_dir->sort)
+ 		do_sort++;
++	}
+ #endif
+ 
+ 	/* see if this entry should have a new weighting */
+diff -u --new-file cdrtools-1.11-old/mkisofs/udf.c cdrtools-1.11/mkisofs/udf.c
+--- cdrtools-1.11-old/mkisofs/udf.c	Wed May 29 15:48:30 2002
++++ cdrtools-1.11/mkisofs/udf.c	Wed Jul 17 16:10:36 2002
+@@ -1362,6 +1362,14 @@
+  * instead of the 10000 range.
+  *
+  * Question: what about JACKET_P files?
++ * Answer: At least as far as I know :)
++ * JACKET_P files are still images (single frame mpeg video .i.e mp2
++ * format). The DVD Jacket pictures will be displayed on the TV screen
++ * when the player is in a stop/resume mode.
++ * The location is not dependent on IFO information and the only must
++ * as far as I know is that they are in upper case (both dir and files).
++ * This sparce information makes me conclude that they don't need any
++ * weight. This obviously needs to be tested.
+  */
+ int
+ #ifdef PROTOTYPES
+diff -u --new-file cdrtools-1.11-old/mkisofs/write.c cdrtools-1.11/mkisofs/write.c
+--- cdrtools-1.11-old/mkisofs/write.c	Wed May 29 15:26:24 2002
++++ cdrtools-1.11/mkisofs/write.c	Wed Jul 17 16:13:27 2002
+@@ -26,6 +26,11 @@
+    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.  */
+ 
+ /* APPLE_HYB James Pearson j.pearson@ge.ucl.ac.uk 23/2/2000 */
++/* 
++   DVD_VIDEO code 
++   Copyright (c) 2002 Olaf Beck - olaf_sc@"NO-SPAM"yahoo.com
++*/
++
+ 
+ #include <mconfig.h>
+ #include "mkisofs.h"
+@@ -36,6 +41,10 @@
+ #endif /* SORTING */
+ #include <errno.h>
+ #include <schily.h>
++#ifdef DVD_VIDEO
++#include "dvd_reader.h"
++#include "ifo_read.h"
++#endif
+ 
+ #ifdef __SVR4
+ extern char    *strdup	__PR((const char *));
+@@ -454,6 +463,11 @@
+ 
+ 	dwpnt = dw_head;
+ 	while (dwpnt) {
++#ifdef DEBUG
++		fprintf(stderr,"The file name is %s and pad is %d, size is %d 
++				and extent is %d\n", dwpnt->name, dwpnt->pad,
++				dwpnt->size, dwpnt->extent);
++#endif
+ 		if (dwpnt->table) {
+ 			xfwrite(dwpnt->table, 1, ISO_ROUND_UP(dwpnt->size),
+ 								outfile);
+@@ -477,9 +491,28 @@
+ 			free(dwpnt->name);
+ 			dwpnt->name = NULL;
+ 		}
++		
++
++#ifdef DVD_VIDEO
++#ifdef APPLE_HYB
++		if (apple_hyb || dvd_video) {
++#endif
++#endif
+ 
+ #ifdef APPLE_HYB
++#ifndef DVD_VIDEO
+ 		if (apple_hyb) {
++#endif
++#endif 
++
++#ifdef DVD_VIDEO
++#ifndef APPLE_HYB
++		if (dvd_video) {
++#endif
++#endif
++
++#ifdef APPLE_HYB
++
+ 			/*
+ 			 * we may have to pad out ISO files to work with HFS
+ 			 * clump sizes
+@@ -487,12 +520,32 @@
+ 			char	blk[SECTOR_SIZE];
+ 			Uint	i;
+ 
+-			for (i = 0; i < dwpnt->pad; i++)
++			for (i = 0; i < dwpnt->pad; i++) {
+ 				xfwrite(blk, 1, SECTOR_SIZE, outfile);
++			}
+ 
+ 			last_extent_written += dwpnt->pad;
+ 		}
+ #endif	/* APPLE_HYB */
++#ifdef DVD_VIDEO
++#ifndef APPLE_HYB
++
++                        /*
++                         * we may have to pad out ISO files to work with HFS
++                         * clump sizes
++                         */
++                        char    blk[SECTOR_SIZE];
++                        Uint    i;
++
++                        for (i = 0; i < dwpnt->pad; i++) {
++                                xfwrite(blk, 1, SECTOR_SIZE, outfile);
++                        }
++
++                        last_extent_written += dwpnt->pad;
++                }
++#endif /* APPLE_HYB */
++#endif /* DVD_VIDEO */
++
+ 
+ 		dwnext = dwpnt;
+ 		dwpnt = dwpnt->next;
+@@ -878,6 +931,14 @@
+ 		set_733((char *) s_entry->isorec.extent, start_extent);
+ 
+ 		start_extent += ISO_BLOCKS(s_entry->size);
++#ifdef DVD_VIDEO
++	/* Shouldn't this be done for every type of sort? Otherwise
++         * we will loose every pad info we add if we sort the files
++	 */
++		if (dvd_video) {
++			start_extent += dwpnt->pad;
++		}
++#endif /*DVD_VIDEO*/
+ 
+ 		/* cache start extents for any linked files */
+ 		add_hash(s_entry);
+@@ -887,6 +948,708 @@
+ }
+ #endif /* SORTING */
+ 
++#ifdef DVD_VIDEO
++
++void 
++#ifdef PROTOTYPES
++bsort(int sector[], int title[], int size)
++#else
++bsort(sector[], title[], size)
++	int sector[];
++	int title[];
++	int size;
++#endif
++{
++
++	int temp_title, temp_sector, i, j;
++
++	for ( i=0; i < size ; i++ ) {
++	  for ( j=0; j < size ; j++ ) {
++		if (sector[i] < sector[j]) {
++			temp_sector = sector[i];
++			temp_title = title[i];
++			sector[i] = sector[j];
++			title[i] = title[j];
++			sector[j] = temp_sector;
++			title[j] = temp_title;
++		}
++	  }
++	}
++}
++
++
++void 
++#ifdef PROTOTYPES
++uniq(int sector[], int title[], int title_sets_array[], 
++	  int sector_sets_array[], int titles)
++#else
++uniq(sector[], title[], title_sets_array[], sector_sets_array[], titles)
++	int sector[];
++	int title[];
++	int title_sets_array[];
++	int sector_sets_array[];
++	int titles;
++#endif
++{
++	int  i, j;
++
++
++	for ( i=0, j=0; j < titles;) {
++		if (sector[j] != sector[j+1]) {
++			title_sets_array[i]  = title[j];
++			sector_sets_array[i] = sector[j];
++#ifdef DEBUG
++			fprintf(stderr,"Sector offset is %d\n", sector_sets_array[i]);
++#endif
++			i++ ;
++			j++ ;
++		} else {
++			do {
++			     if (j < titles) {
++				j++ ;
++			   }
++			} while ( sector[j] == sector[j+1] );
++
++		}
++	}
++
++}
++
++void 
++#ifdef PROTOTYPES
++DVDFreeFileSetArrays(int * sector, int * title, int * title_sets_array, 
++			  int * sector_sets_array) 
++#else
++DVDFreeFileSetArrays(sector, title, title_sets_array, sector_sets_array)
++	int * sector;
++	int * title;
++	int * title_sets_array;
++	int * sector_sets_array;
++#endif
++{
++	free(sector);
++	free(title);
++	free(title_sets_array);
++	free(sector_sets_array);
++}
++
++void 
++#ifdef PROTOTYPES
++DVDFreeFileSet(title_set_info_t * title_set_info) 
++#else
++DVDFreeFileSet(title_set_info)
++	title_set_info_t * title_set_info;
++#endif
++{
++	free(title_set_info->title_set);
++	free(title_set_info);
++}
++
++#ifdef PROTOTYPES
++title_set_info_t *DVDGetFileSet(char * dvd) 
++#else
++title_set_info_t *DVDGetFileSet(dvd)
++	char * dvd;
++#endif
++{
++
++ 	/* TODO  Fix close of files if 
++         *       we error out
++	 *       We also assume that all
++	 *       DVD files are of valid
++	 *       size i.e. file%2048 == 0
++         */
++
++	/* title interation */
++	int title_sets, titles, counter, i;
++
++	/* DVD file structures */
++	dvd_reader_t *	_dvd=NULL;
++
++	ifo_handle_t *	vmg_ifo=NULL;
++	ifo_handle_t *	vts_ifo=NULL;
++
++	dvd_file_t   *	vmg_vob_file=NULL;
++	dvd_file_t   *	vmg_ifo_file=NULL;
++
++	dvd_file_t   *  vts_ifo_file=NULL;
++	dvd_file_t   *	vts_menu_file=NULL;
++	dvd_file_t   *  vts_title_file=NULL;
++
++	/* The sizes it self of each file */
++	int ifo, bup, menu_vob, title_vob;
++
++	/* Arrays keeping the title - filset relationship */
++
++	int * sector;
++	int * title;
++	int * title_sets_array;
++	int * sector_sets_array;
++
++	/* DVD Video files */
++	struct stat fileinfo;
++	char   temppoint[PATH_MAX + 1];
++
++	/* The Title Set Info struct*/
++	title_set_info_t * title_set_info;
++
++	/* Temporary mount point - to be used later */
++
++	char  mountpoint[PATH_MAX + 1];
++
++	strcpy(mountpoint, dvd);
++
++
++	_dvd = DVDOpen(dvd);
++	if(!_dvd) { 
++		fprintf(stderr, "Can't open device\n");
++		return(0);
++	}
++	vmg_ifo = ifoOpen( _dvd, 0 );
++	if( !vmg_ifo ) {
++        	fprintf( stderr, "Can't open VMG info.\n" );
++        	return (0);
++    	}
++
++	/* Check mount point */
++
++	sprintf(temppoint,"%s/VIDEO_TS/VIDEO_TS.IFO", mountpoint);
++
++
++	if( stat(temppoint, &fileinfo)  < 0 ) {
++		/* If we can't stat the file, give up */
++		fprintf(stderr,"Can't stat %s\n", temppoint );
++		perror("");
++		return(0);
++	}
++
++
++
++	title_sets = vmg_ifo->vmgi_mat->vmg_nr_of_title_sets;
++	titles = vmg_ifo->tt_srpt->nr_of_srpts;
++
++	sector = malloc(titles * sizeof(int));
++	if(!sector) return(0);
++	title  = malloc(titles * sizeof(int));
++	if(!title) {
++		free(sector);
++		return(0);
++	}
++	title_sets_array = malloc(title_sets * sizeof(int));
++	if(!title_sets_array) {
++		free(sector);
++		free(title);
++		return(0);
++	}
++	sector_sets_array = malloc(title_sets * sizeof(int));
++	if(!sector_sets_array) {
++		free(sector);
++		free(title);
++		free(title_sets_array);
++		return(0);
++	}
++	memset(sector, 0, titles);
++
++
++	title_set_info = (title_set_info_t *)malloc(sizeof(title_set_info_t));
++	if(!title_set_info) {
++		free(sector);
++		free(title);
++		free(title_sets_array);
++		free(sector_sets_array);
++		return(0);
++	}
++	title_set_info->title_set = (title_set_t *)malloc((title_sets + 1) * 
++							sizeof(title_set_t));
++	if (!title_set_info->title_set) {
++		free(sector);
++		free(title);
++		free(title_sets_array);
++		free(sector_sets_array);
++		free(title_set_info);
++		return(0);
++	}
++
++	title_set_info->num_titles = title_sets;
++
++
++	/* Fill and sort the arrays for titles*/
++
++	if ( titles >= 1 ) {
++		for (counter=0; counter < titles; counter++ )  {
++			sector[counter]=vmg_ifo->tt_srpt->title[counter].title_set_sector;
++			title[counter]=counter + 1;
++		}
++	}
++
++	/* Yes, we should probably do a better sort than B - but what the heck*/
++	bsort(sector, title, titles);
++
++
++	/* Since title sets and titles are not the same we will need to sort 
++	 * out "bogus" titles
++         */
++
++	uniq(sector, title, title_sets_array, sector_sets_array, titles);
++
++
++
++	/* Open VIDEO_TS.VOB is present */
++
++	vmg_vob_file = DVDOpenFile(_dvd, 0, DVD_READ_MENU_VOBS);
++
++	/* Check VIDEO_TS title set */
++
++	vmg_ifo_file = DVDOpenFile(_dvd, 0, DVD_READ_INFO_FILE);
++
++	if ( (vmg_vob_file == 0 ) && vmg_ifo->vmgi_mat->vmg_last_sector + 1 
++	     		< 2 * DVDFileSize(vmg_ifo_file)) {
++		fprintf(stderr,"IFO is not of correct size aborting\n");
++		DVDFreeFileSetArrays(sector, title, title_sets_array, 
++				     sector_sets_array);
++		DVDFreeFileSet(title_set_info);
++		return(0);
++	} else if ((vmg_vob_file != 0) && (vmg_ifo->vmgi_mat->vmg_last_sector 
++		    + 1  < 2 * DVDFileSize(vmg_ifo_file) + 
++		    DVDFileSize(vmg_vob_file))) {
++		fprintf(stderr,"Either VIDEO_TS.IFO or VIDEO_TS.VOB is not of correct size");
++		DVDFreeFileSetArrays(sector, title, title_sets_array,
++				     sector_sets_array);
++		DVDFreeFileSet(title_set_info);
++		return(0);
++	}
++
++	/* Find the actuall right size of VIDEO_TS.IFO */
++
++	if (vmg_vob_file == 0 ) {
++		if ( vmg_ifo->vmgi_mat->vmg_last_sector + 1 > 2 
++				*  DVDFileSize(vmg_ifo_file) ){
++			ifo=vmg_ifo->vmgi_mat->vmg_last_sector 
++			    - DVDFileSize(vmg_ifo_file) + 1;
++		} else {
++			ifo=vmg_ifo->vmgi_mat->vmgi_last_sector + 1;
++		}
++	} else {
++		if (vmg_ifo->vmgi_mat->vmgi_last_sector + 1 
++				< vmg_ifo->vmgi_mat->vmgm_vobs) {
++			ifo=vmg_ifo->vmgi_mat->vmgm_vobs;
++		} else {
++			ifo=vmg_ifo->vmgi_mat->vmgi_last_sector + 1;
++		}
++	}
++
++	title_set_info->title_set[0].size_ifo = ifo * 2048;
++	title_set_info->title_set[0].realsize_ifo = fileinfo.st_size;
++	title_set_info->title_set[0].pad_ifo = ifo - DVDFileSize(vmg_ifo_file);
++
++	/* Find the actuall right size of VIDEO_TS.VOB */
++
++	if (vmg_vob_file != 0 ) {
++		if ( ifo + DVDFileSize(vmg_ifo_file) + 
++		     DVDFileSize(vmg_vob_file) - 1 < 
++		     vmg_ifo->vmgi_mat->vmg_last_sector) {
++				menu_vob = vmg_ifo->vmgi_mat->vmg_last_sector -
++					   ifo - DVDFileSize(vmg_ifo_file) + 1;
++		} else {
++			menu_vob = vmg_ifo->vmgi_mat->vmg_last_sector 
++			- ifo - DVDFileSize(vmg_ifo_file) + 1;
++		}
++
++		sprintf(temppoint,"%s/VIDEO_TS/VIDEO_TS.VOB", mountpoint);	
++		if( stat(temppoint, &fileinfo)  < 0 ) {
++			fprintf(stderr,"calc: Can't stat %s\n", temppoint );
++			perror("");
++			DVDFreeFileSetArrays(sector, title, title_sets_array, 
++					     sector_sets_array);
++			DVDFreeFileSet(title_set_info);
++			return(0);
++		}
++
++		title_set_info->title_set[0].realsize_menu = fileinfo.st_size;
++		title_set_info->title_set[0].pad_menu = menu_vob - 
++						DVDFileSize(vmg_vob_file);
++		title_set_info->title_set[0].size_menu = menu_vob * 2048;
++		DVDCloseFile(vmg_vob_file);
++	} else {
++		title_set_info->title_set[0].size_menu = 0;
++		title_set_info->title_set[0].realsize_menu = 0;
++		title_set_info->title_set[0].pad_menu = 0;
++		menu_vob = 0 ;
++	}
++
++
++	/* Finding the actuall right size of VIDEO_TS.BUP */
++
++        if ( title_sets >= 1 ) {
++		bup = sector_sets_array[0] - menu_vob - ifo;
++	} else {
++		/* Just in case we burn a DVD-Video without any title_sets */
++		bup = vmg_ifo->vmgi_mat->vmg_last_sector + 1 - menu_vob - ifo ;
++	}
++
++	/* Never trust the BUP file - use a copy of the IFO */	
++	sprintf(temppoint,"%s/VIDEO_TS/VIDEO_TS.IFO", mountpoint);
++	
++	if( stat(temppoint, &fileinfo)  < 0 ) {
++		fprintf(stderr,"calc: Can't stat %s\n", temppoint );
++		perror("");
++		DVDFreeFileSetArrays(sector, title, title_sets_array, 
++				     sector_sets_array);
++		DVDFreeFileSet(title_set_info);
++		return(0);
++	}
++	
++	title_set_info->title_set[0].realsize_bup = fileinfo.st_size;
++	title_set_info->title_set[0].size_bup = bup * 2048;
++	title_set_info->title_set[0].pad_bup = bup - DVDFileSize(vmg_ifo_file);
++
++	/* Take care of the titles which we don't have in VMG */
++
++	title_set_info->title_set[0].number_of_vob_files = 0;	
++	title_set_info->title_set[0].realsize_vob[0] = 0;
++	title_set_info->title_set[0].pad_title = 0;
++	
++	
++
++	DVDCloseFile(vmg_ifo_file);
++
++
++
++	if ( title_sets >= 1 ) {
++ 		for (counter=0; counter < title_sets; counter++ ){
++
++			vts_ifo = ifoOpen( _dvd,counter + 1);
++
++		 	if( !vts_ifo ) {
++                		fprintf(stderr, "Can't open VTS info.\n");
++				DVDFreeFileSetArrays(sector, title, 
++					title_sets_array, sector_sets_array);
++				DVDFreeFileSet(title_set_info);
++                		return (0);
++			}
++		
++			sprintf(temppoint,"%s/VIDEO_TS/VTS_%02i_0.IFO", 
++				mountpoint, counter + 1);
++
++			if(stat(temppoint, &fileinfo)  < 0 ) {
++                		fprintf(stderr,"calc: Can't stat %s\n", 
++					temppoint );
++				perror("");
++				DVDFreeFileSetArrays(sector, title, 
++					title_sets_array, sector_sets_array);
++				DVDFreeFileSet(title_set_info);
++				return(0);
++			}
++
++
++			/* Test if VTS_XX_0.VOB is present */
++
++			vts_menu_file = DVDOpenFile(_dvd, counter + 1, 
++					DVD_READ_MENU_VOBS);
++
++			/* Test if VTS_XX_X.VOB are present */
++
++			vts_title_file = DVDOpenFile(_dvd, counter + 1, 
++					 DVD_READ_TITLE_VOBS);
++
++		        /* Check VIDEO_TS.IFO */
++
++			vts_ifo_file = DVDOpenFile(_dvd, counter + 1, 
++				       DVD_READ_INFO_FILE);
++		
++
++			/* Checking that title will fit in the 
++			   space given by the ifo file 
++			 */
++
++
++			if ( vts_ifo->vtsi_mat->vts_last_sector + 1 
++			     < 2 * DVDFileSize(vts_ifo_file)) {
++               			fprintf(stderr,"IFO is not of correct size aborting\n");
++				DVDFreeFileSetArrays(sector, title, 
++					title_sets_array, sector_sets_array);
++				DVDFreeFileSet(title_set_info);
++               			return(0);
++       			} else if ((vts_title_file != 0) &&  
++				   (vts_menu_file != 0) && 
++				   (vts_ifo->vtsi_mat->vts_last_sector + 1  
++				    < 2 * DVDFileSize(vts_ifo_file) +
++				    DVDFileSize(vts_title_file) + 
++				    DVDFileSize(vts_menu_file))) {
++               			fprintf(stderr,"Either VIDEO_TS.IFO or VIDEO_TS.VOB is not of correct size");
++				DVDFreeFileSetArrays(sector, title, 
++					title_sets_array, sector_sets_array);
++				DVDFreeFileSet(title_set_info);
++               			return(0);
++       			} else if ((vts_title_file != 0) && 
++				   (vts_menu_file == 0) && 
++				   (vts_ifo->vtsi_mat->vts_last_sector + 1  
++				    < 2 * DVDFileSize(vts_ifo_file) +
++				    DVDFileSize(vts_title_file))) {
++				fprintf(stderr,"Either VIDEO_TS.IFO or VIDEO_TS.VOB is not of correct size");
++				DVDFreeFileSetArrays(sector, title, 
++					title_sets_array, sector_sets_array);
++				DVDFreeFileSet(title_set_info);
++				return(0);
++			} else if ((vts_menu_file != 0) && 
++				   (vts_title_file == 0) && 
++				   (vts_ifo->vtsi_mat->vts_last_sector + 1
++			  	    < 2 * DVDFileSize(vts_ifo_file) +
++				    DVDFileSize(vts_menu_file))) {
++				fprintf(stderr,"Either VIDEO_TS.IFO or VIDEO_TS.VOB is not of correct size");
++                		DVDFreeFileSetArrays(sector, title, 
++					title_sets_array, sector_sets_array);
++                		DVDFreeFileSet(title_set_info);
++				return(0);
++			}
++			
++
++			/* Find the actuall right size of VTS_XX_0.IFO */
++			if ((vts_title_file  == 0)  && (vts_menu_file ==  0)) {
++				if (vts_ifo->vtsi_mat->vts_last_sector + 1 > 
++				    2 *  DVDFileSize(vts_ifo_file)){
++					ifo=vts_ifo->vtsi_mat->vts_last_sector 
++					    - DVDFileSize(vts_ifo_file) + 1;
++				} else {
++					ifo=vts_ifo->vtsi_mat->vts_last_sector 
++					    - DVDFileSize(vts_ifo_file) + 1;
++				}
++			} else if (vts_title_file  == 0) {
++				if (vts_ifo->vtsi_mat->vtsi_last_sector + 1 < 
++				    vts_ifo->vtsi_mat->vtstt_vobs){
++					ifo=vmg_ifo->vtsi_mat->vtstt_vobs;
++				} else {
++					ifo=vmg_ifo->vtsi_mat->vtstt_vobs;
++				}
++			} else {
++				if (vts_ifo->vtsi_mat->vtsi_last_sector + 1 < 
++				    vts_ifo->vtsi_mat->vtsm_vobs){
++					ifo=vts_ifo->vtsi_mat->vtsm_vobs;
++				} else {
++					ifo=vts_ifo->vtsi_mat->vtsi_last_sector + 1;
++				}
++			}
++			title_set_info->title_set[counter + 1].size_ifo = 
++						ifo * 2048;
++			title_set_info->title_set[counter + 1].realsize_ifo = 
++						fileinfo.st_size;
++			title_set_info->title_set[counter + 1].pad_ifo = 
++						ifo - DVDFileSize(vts_ifo_file);
++
++
++			/* Find the actuall right size of VTS_XX_0.VOB */
++
++			if (vts_menu_file != 0) {
++				if ((vts_title_file != 0) && 
++				    (vts_ifo->vtsi_mat->vtstt_vobs - 
++				     vts_ifo->vtsi_mat->vtsm_vobs > 
++				     DVDFileSize(vts_menu_file))) {
++					menu_vob=vts_ifo->vtsi_mat->vtstt_vobs -
++						 vts_ifo->vtsi_mat->vtsm_vobs;
++				} else if ((vts_title_file == 0) && 
++					   (vts_ifo->vtsi_mat->vtsm_vobs + 
++					   DVDFileSize(vts_menu_file) + 
++					   DVDFileSize(vts_ifo_file) - 1 < 
++					   vts_ifo->vtsi_mat->vts_last_sector)) {
++				      menu_vob=vts_ifo->vtsi_mat->vts_last_sector
++					      - DVDFileSize(vts_ifo_file) 
++					      - vts_ifo->vtsi_mat->vtsm_vobs + 1;
++				} else {
++					menu_vob=vts_ifo->vtsi_mat->vtstt_vobs -
++						 vts_ifo->vtsi_mat->vtsm_vobs;
++				}
++
++				sprintf(temppoint,"%s/VIDEO_TS/VTS_%02i_0.VOB", mountpoint, counter + 1);
++
++				if( stat(temppoint, &fileinfo)  < 0 ) {
++					fprintf(stderr,"calc: Can't stat %s\n", 
++						temppoint );
++					perror("");
++					DVDFreeFileSetArrays(sector, title, 
++					 title_sets_array, sector_sets_array);
++					DVDFreeFileSet(title_set_info);
++					return(0);
++				}
++
++				title_set_info->title_set[counter + 1].realsize_menu = fileinfo.st_size;
++				title_set_info->title_set[counter + 1].size_menu = menu_vob * 2048;
++				title_set_info->title_set[counter + 1].pad_menu = menu_vob - DVDFileSize(vts_menu_file);
++
++			} else {
++				title_set_info->title_set[counter + 1].size_menu = 0;
++				title_set_info->title_set[counter + 1].realsize_menu = 0;
++				title_set_info->title_set[counter + 1].pad_menu = 0 ;
++				menu_vob=0;
++			}
++
++
++			/* Find the actuall total size of VTS_XX_[1 to 9].VOB */
++
++			if (vts_title_file != 0 ) {
++				if (ifo + menu_vob + DVDFileSize(vts_ifo_file) -
++ 				    1  < vts_ifo->vtsi_mat->vts_last_sector) {
++				     title_vob=vts_ifo->vtsi_mat->vts_last_sector
++						+ 1 - ifo - menu_vob - 
++						DVDFileSize(vts_ifo_file);
++				} else {
++				   title_vob=vts_ifo->vtsi_mat->vts_last_sector +
++					     1 - ifo - menu_vob - 
++					     DVDFileSize(vts_ifo_file);
++				}
++				 /* Find out how many vob files 
++				  * and the size of them 
++				  */
++				for( i = 0; i < 9; ++i ) {
++				    sprintf(temppoint,
++					"%s/VIDEO_TS/VTS_%02i_%i.VOB", 
++					mountpoint, counter + 1, i + 1 );
++					if(stat(temppoint, &fileinfo) < 0 ) {
++						break;
++					}
++					title_set_info->title_set[counter + 1].realsize_vob[i] = fileinfo.st_size;
++				}
++				title_set_info->title_set[counter + 1].number_of_vob_files = i;
++				title_set_info->title_set[counter + 1].size_title = title_vob * 2048;
++				title_set_info->title_set[counter + 1].pad_title = title_vob - DVDFileSize(vts_title_file);
++			} else {
++				title_set_info->title_set[counter + 1].number_of_vob_files = 0;
++				title_set_info->title_set[counter + 1].realsize_vob[0] = 0;
++				title_set_info->title_set[counter + 1].size_title = 0;
++				title_set_info->title_set[counter + 1].pad_title = 0;
++				title_vob=0;
++
++			}
++
++
++			/* Find the actuall total size of VTS_XX_0.BUP */
++
++                        if (title_sets - 1 > counter )        {
++				bup=sector_sets_array[counter+1]
++					- sector_sets_array[counter]
++					- title_vob - menu_vob - ifo;
++			} else {
++				bup = vts_ifo->vtsi_mat->vts_last_sector + 1 
++					- title_vob - menu_vob - ifo;
++			}
++
++			/* Never trust the BUP use a copy of the IFO */
++
++			sprintf(temppoint,"%s/VIDEO_TS/VTS_%02i_0.IFO", 
++				mountpoint, counter + 1);
++
++			if( stat(temppoint, &fileinfo)  < 0 ) {
++				fprintf(stderr,"calc: Can't stat %s\n", 
++					temppoint );
++				perror("");
++				DVDFreeFileSetArrays(sector, title, 
++					title_sets_array, sector_sets_array);
++				DVDFreeFileSet(title_set_info);
++				return(0);
++			}
++
++			title_set_info->title_set[counter + 1].size_bup = 
++						bup * 2048;
++			title_set_info->title_set[counter + 1].realsize_bup = 
++						fileinfo.st_size;
++			title_set_info->title_set[counter + 1].pad_bup = 
++						bup - DVDFileSize(vts_ifo_file);
++
++
++			/* Closing files */
++
++                        if (vts_menu_file != 0) {
++				DVDCloseFile(vts_menu_file);
++			}
++
++                        if (vts_title_file != 0) {
++				DVDCloseFile(vts_title_file);
++			}
++
++
++                        if (vts_ifo_file != 0) {
++				DVDCloseFile(vts_ifo_file);
++			}
++
++			ifoClose(vts_ifo);
++
++		}
++
++        }
++
++
++	DVDFreeFileSetArrays(sector, title, title_sets_array, sector_sets_array);
++
++        /* Close the VMG ifo file we got all the info we need */
++        ifoClose(vmg_ifo);
++
++
++	/* Close the DVD */
++	DVDClose(_dvd);
++	
++	/* Return the actuall info*/
++	return(title_set_info);
++
++
++}
++#ifdef PROTOTYPES
++int DVDGetFilePad(title_set_info_t * title_set_info,char *  name) 
++#else
++int DVDGetFilePad(title_set_info, name)
++	title_set_info_t * title_set_info;
++	char *  name;
++#endif
++{
++
++	char title_a[3]="";
++	char vob_a[2]="";
++	int title;
++	int vob;
++
++	if (name[0] != 'V') {
++		return(0);
++	}
++	if (memcmp(name, "VIDEO_TS", 8) == 0) {
++		if (strstr(name,".IFO") != 0) {
++			return(title_set_info->title_set[0].pad_ifo);
++		} else if (strstr(name,".VOB") != 0) {
++			return(title_set_info->title_set[0].pad_menu);
++		} else if (strstr(name,".BUP") != 0) {
++			return(title_set_info->title_set[0].pad_bup);
++		} else {
++			return(0);
++		}
++	} else if (memcmp(name, "VTS_", 4) == 0) {
++		title_a[0] = name[4];
++		title_a[1] = name[5];
++		title_a[2] = '\0';
++		vob_a[0] = name[7];
++		vob_a[1] = '\0'; 
++		title = atoi(title_a);
++		vob = atoi(vob_a);
++		if(title > title_set_info->num_titles) {
++			return(0);
++		} else {
++			if (strstr(name,".IFO") != 0) {
++				return(title_set_info->title_set[title].pad_ifo);
++			} else if  (strstr(name,".BUP") != 0) {
++				return(title_set_info->title_set[title].pad_bup);
++			} else if ( vob == 0 ) {
++			       return(title_set_info->title_set[title].pad_menu);
++			} else if (vob == title_set_info->title_set[title].number_of_vob_files) {
++			      return(title_set_info->title_set[title].pad_title);
++			} else {
++				return(0);
++			}
++		}
++	} else {
++		return(0);
++	}
++}
++
++#endif /*DVD_VIDEO*/
++
++
++
+ 
+ static void
+ assign_file_addresses(dpnt)
+@@ -897,6 +1660,29 @@
+ 	struct file_hash *s_hash;
+ 	struct deferred_write *dwpnt;
+ 	char		whole_path[1024];
++#ifdef DVD_VIDEO
++	char		dvd_path[1024];
++	title_set_info_t * title_set_info=NULL;
++#endif
++
++	/*fprintf(stderr,"The dir is %s\n", dpnt->de_name);*/
++#ifdef DVD_VIDEO
++	/*if (dvd_video && (strcmp(dpnt->de_name, "VIDEO_TS") == 0)) {
++	  This one doesn't work unless we do the fprintf above ??? */
++	if (dvd_video && (strstr(dpnt->whole_name, "VIDEO_TS") != 0)) {
++		strncpy(dvd_path, dpnt->whole_name,(strnlen(dpnt->whole_name) 
++			- 8));
++		dvd_path[strnlen(dvd_path)] = '\0'; 
++#ifdef DEBUG
++		fprintf(stderr, "Found it the path is %s \n", dvd_path);
++#endif
++		title_set_info = DVDGetFileSet(dvd_path);
++		if (title_set_info == 0) {
++			dvd_video = 0;
++			fprintf(stderr, "Not able to make a DVD-Video image");
++		}
++	}
++#endif /*DVD_VIDEO*/
+ 
+ 	while (dpnt) {
+ 		s_entry = dpnt->contents;
+@@ -954,6 +1740,11 @@
+ 					finddir = finddir->next;
+ 					if (!finddir) {
+ #ifdef	USE_LIBSCHILY
++#ifdef  DVD_VIDEO
++						if ( title_set_info != 0 ) {
++							DVDFreeFileSet(title_set_info);
++						}
++#endif
+ 						comerrno(EX_BAD,
+ 							"Fatal goof - could not find dir entry for '%s'\n",
+ 							s_entry->name);
+@@ -961,6 +1752,11 @@
+ 						fprintf(stderr,
+ 							"Fatal goof - could not find dir entry for '%s'\n",
+ 							s_entry->name);
++#ifdef DVD_VIDEO
++						if ( title_set_info != 0 ) {
++							DVDFreeFileSet(title_set_info);
++						}
++#endif
+ 						exit(1);
+ #endif
+ 					}
+@@ -1032,6 +1828,14 @@
+ 				dwpnt->s_entry = s_entry;
+ 				/* set the initial padding to zero */
+ 				dwpnt->pad = 0;
++#ifdef DVD_VIDEO
++				if(dvd_video && (title_set_info != 0)) {
++					dwpnt->pad = DVDGetFilePad(title_set_info, s_entry->name);
++#ifdef DEBUG
++					fprintf(stderr, "The pad was %d for file %s\n", dwpnt->pad, s_entry->name);
++#endif
++				}
++#endif /*DVD_VIDEO*/
+ #ifdef APPLE_HYB
+ 				/*
+ 				 * maybe an offset to start of the real
+@@ -1068,6 +1872,12 @@
+ 				s_entry->starting_block = last_extent;
+ 				add_hash(s_entry);
+ 				last_extent += ISO_BLOCKS(s_entry->size);
++#ifdef DVD_VIDEO
++				/* Shouldn't we always add the pad info? */
++				if(dvd_video) {
++					last_extent += dwpnt->pad;
++				}
++#endif /*DVD_VIDEO*/
+ 				if (verbose > 2) {
+ 					fprintf(stderr, "%d %d %s\n",
+ 						s_entry->starting_block,
+@@ -1119,6 +1929,11 @@
+ 		}
+ 		dpnt = dpnt->next;
+ 	}
++#ifdef DVD_VIDEO
++	if (title_set_info != NULL ) {
++		DVDFreeFileSet(title_set_info);
++	}
++#endif /*DVD_VIDEO*/
+ }/* assign_file_addresses(... */
+ 
+ static void
